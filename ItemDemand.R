@@ -4,6 +4,7 @@ library(tidyverse)
 library(patchwork)
 library(tidymodels)
 library(forecast)
+library(modeltime)
 
 
 ID_train <- vroom("./train.csv") 
@@ -83,8 +84,88 @@ bestMetric <- collect_metrics(CV_results) %>%
 
 bestMetric
 
-final_wf <-
-  RF_amazon_workflow %>% 
-  finalize_workflow(bestTune) %>% 
-  fit(data = amazon_train)
+#####################
+#Arima models 
 
+arima_recipe <- recipe(sales~., data = train) %>% 
+  step_date(date, features =c("dow","month","year"))
+
+arima_model <- arima_reg(seasonal_period = 365,
+                         non_seasonal_ar = 5,
+                         non_seasonal_ma = 5, 
+                         seasonal_ar = 2,
+                         non_seasonal_differences = 2,
+                         seasonal_differences = 2) %>% 
+  set_engine("auto_arima")
+
+train <- ID_train %>% filter(store==3, item==17)
+cv_split <- time_series_split(train, assess="3 months", cumulative = TRUE)
+cv_split %>%
+tk_time_series_cv_plan() %>% 
+  plot_time_series_cv_plan(date, sales, .interactive=FALSE)
+test <- ID_test %>% filter(store == 3, item == 17)
+cv_split <- time_series_split(test, assess= "3 months", cumulative = TRUE)
+
+arima_wf <- workflow() %>% 
+  add_recipe(arima_recipe) %>% 
+  add_model(arima_model) %>% 
+  fit(data=training(cv_split))
+
+
+cv_results <- modeltime_calibrate(arima_wf, 
+                                  new_data = testing(cv_split))
+p1<- cv_results %>% 
+  modeltime_forecast(new_data = testing(cv_split),
+                     actual_data = train) %>% 
+  plot_modeltime_forecast(.interactive = FALSE)
+
+cv_results %>% modeltime_accuracy() %>% 
+  table_modeltime_accuracy(.interactive = FALSE)
+
+
+arima_fullfit <- cv_results %>% 
+  modeltime_refit(data = train)
+
+arima_preds <- arima_fullfit %>% 
+  modeltime_forecast(new_data=train) %>% 
+  rename(date= .index, sales = .value) %>% 
+  select(date, sales) %>% 
+  full_join(., y= ID_test, by= "date") %>% 
+  select(id, sales)
+
+p2<- arima_fullfit %>% 
+  modeltime_forecast(new_data= train, actual_data = train) %>% 
+  plot_modeltime_forecast(.interactive = FALSE)
+
+
+arima_wf <- workflow() %>% 
+  add_recipe(arima_recipe) %>% 
+  add_model(arima_model) %>% 
+  fit(data=training(cv_split))
+
+
+cv_results <- modeltime_calibrate(arima_wf, 
+                                  new_data = testing(cv_split))
+p3 <- cv_results %>% 
+  modeltime_forecast(new_data = testing(cv_split),
+                     actual_data = train) %>% 
+  plot_modeltime_forecast(.interactive = FALSE)
+
+cv_results %>% modeltime_accuracy() %>% 
+  table_modeltime_accuracy(.interactive = FALSE)
+
+arima_fullfit <- cv_results %>% 
+  modeltime_refit(data = train)
+
+arima_preds <- arima_fullfit %>% 
+  modeltime_forecast(new_data=train) %>% 
+  rename(date= .index, sales = .value) %>% 
+  select(date, sales) %>% 
+  full_join(., y= ID_test, by= "date") %>% 
+  select(id, sales)
+
+p4 <- arima_fullfit %>% 
+  modeltime_forecast(new_data= train, actual_data = train) %>% 
+  plot_modeltime_forecast(.interactive = FALSE, .legend_show = FALSE)
+
+plotly::subplot(p1,p3, p2,p4, nrows = 2)  
